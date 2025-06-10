@@ -1,13 +1,23 @@
 // Copyright (c) 2016, David M. Lee, II
-import 'babel-polyfill';
 
 import _ from 'lodash';
 import _knex from 'knex';
-import program from 'commander';
+import { Command } from 'commander';
 import read from 'read';
 
 const { name, version } = require('../package.json');
+const program = new Command();
 
+// interface TableSpec {
+// database: string;
+// table: string;
+// }
+
+// interface ColumnSpec extends TableSpec {
+// column: string;
+// }
+
+/** @type {string[]} */
 const databasesToSkip = [
   'information_schema',
   'mysql',
@@ -15,10 +25,13 @@ const databasesToSkip = [
   'sys',
 ];
 
+/** @type {{database: string, table: string}[]} */
 const tablesToSkip = [];
 
+/** @type {{database: string, table: string, column: string}[]} */
 const columnsToSkip = [];
 
+/** @type {string[]} */
 const databasesToLimit = [];
 
 function skip(spec) {
@@ -39,6 +52,8 @@ function skip(spec) {
   }
 }
 
+console.log(`Original arguments: ${JSON.stringify(process.argv)}`);
+
 program.version(version)
   .option('-h --host [host]', 'MySQL server to connect to [localhost]', 'localhost')
   .option('-u --user [user]', 'User to connect with [root]', 'root')
@@ -57,7 +72,10 @@ program.on('--help', () => {
   console.log('The --password may option may optionally specify the password, but putting');
   console.log('passwords on the command line are not recommended.');
 });
+
+// console.log(`Parsing arguments from: ${JSON.stringify(process.argv)}`);
 program.parse(process.argv);
+// console.log(`Parsed options: ${JSON.stringify(program.opts())}`);
 
 function commentOut(arg) {
   return arg.split(/\n/)
@@ -66,26 +84,32 @@ function commentOut(arg) {
 }
 
 function debug(...args) {
-  if (program.verbose) {
+  const options = program.opts();
+  if (options.verbose) {
     const commented = _.map(args, commentOut);
     commented.unshift('--');
     console.log.apply(null, commented);
   }
 }
 
-const CharsetsToConvert = program.forceLatin1 ? ['utf8', 'latin1'] : ['utf8'];
+const options = program.opts();
+const CharsetsToConvert = options.forceLatin1 ? ['utf8', 'latin1', 'utf8mb3'] : ['utf8','utf8mb3'];
 
-debug('settings', JSON.stringify(_.pick(program, ['host', 'user', 'forceLatin1', 'makeItSo'])));
+debug('settings', JSON.stringify(_.pick(options, ['host', 'user', 'forceLatin1', 'makeItSo'])));
 
 async function go() {
+  const options = program.opts();
+  let password = options.password;
+
   if (process.env.MYSQL_PWD) {
-    program.password = process.env.MYSQL_PWD;
+    password = process.env.MYSQL_PWD;
   }
-  if (!_.isUndefined(program.password) && !_.isString(program.password)) {
-    program.password = await new Promise((resolve, reject) => {
+  if (!_.isUndefined(password) && !_.isString(password)) {
+    password = await new Promise((resolve, reject) => {
       read({
         prompt: 'Password:',
         silent: true,
+        terminal: true // Added for compatibility with modern `read` versions
       }, (err, res) => {
         if (err) { return reject(err); }
         resolve(res);
@@ -96,9 +120,9 @@ async function go() {
   const knex = _knex({
     client: 'mysql',
     connection: {
-      host: program.host,
-      user: program.user,
-      password: program.password,
+      host: options.host,
+      user: options.user,
+      password: password,
       database: 'mysql',
     },
   });
@@ -120,7 +144,8 @@ async function go() {
 
   function alter(ddl) {
     console.log(`${ddl.replace(/\s+/g, ' ').trim()}`);
-    if (program.makeItSo) {
+    const options = program.opts();
+    if (options.makeItSo) {
       return time(knex.schema.raw(ddl));
     }
   }
@@ -131,101 +156,125 @@ async function go() {
   }
 
   let dbQuery = knex('information_schema.SCHEMATA')
-      .where('schema_name', 'not in', databasesToSkip);
+      .where('SCHEMA_NAME', 'not in', databasesToSkip); // Use actual column name: SCHEMA_NAME
   if (!_.isEmpty(databasesToLimit)) {
-    dbQuery = dbQuery.where('schema_name', 'in', databasesToLimit);
+    dbQuery = dbQuery.whereIn('SCHEMA_NAME', databasesToLimit); // Filter by SCHEMA_NAME using whereIn
   }
   let databases = await select(dbQuery
-    .where('default_character_set_name', 'in', CharsetsToConvert)
-    .columns('schema_name'));
-  databases = _.map(databases, 'schema_name');
+    .where('DEFAULT_CHARACTER_SET_NAME', 'in', CharsetsToConvert) // Use actual column name: DEFAULT_CHARACTER_SET_NAME
+    .columns('SCHEMA_NAME')); // Select SCHEMA_NAME directly
+  databases = _.map(databases, 'SCHEMA_NAME'); // Pluck SCHEMA_NAME
 
   debug(`Altering ${databases.length} databases`);
   for (const db of databases) {
     await alter(`
       ALTER DATABASE \`${db}\`
         CHARACTER SET = utf8mb4
-        COLLATE = utf8mb4_unicode_ci`);
+        COLLATE = utf8mb4_0900_ai_ci`);
   }
 
   let tableQuery = knex('information_schema.COLLATION_CHARACTER_SET_APPLICABILITY as CCSA')
-    .join('information_schema.TABLES as T', 'CCSA.collation_name', 'T.table_collation')
-    .where('T.table_schema', 'not in', databasesToSkip);
+    .join('information_schema.TABLES as T', 'CCSA.COLLATION_NAME', 'T.TABLE_COLLATION') // Use actual column names
+    .where('T.TABLE_SCHEMA', 'not in', databasesToSkip); // Use actual column name: T.TABLE_SCHEMA
   for (const tableToSkip of tablesToSkip) {
-    tableQuery = tableQuery.whereNot(function skipTables() {
-      this.where({ 'T.table_schema': tableToSkip.database, 'T.table_name': tableToSkip.table });
+    tableQuery = tableQuery.whereNot(function() {
+      this.where({ 'T.TABLE_SCHEMA': tableToSkip.database, 'T.TABLE_NAME': tableToSkip.table }); // Use actual column names
     });
+  }
+  if (!_.isEmpty(databasesToLimit)) { // Apply databasesToLimit to tableQuery
+    tableQuery = tableQuery.whereIn('T.TABLE_SCHEMA', databasesToLimit);
   }
   const tables = await select(
     tableQuery
-      .where('CCSA.character_set_name', 'in', CharsetsToConvert)
-      .where('T.table_type', 'BASE TABLE')
-      .columns('T.table_schema', 'T.table_name'));
+      .where('CCSA.CHARACTER_SET_NAME', 'in', CharsetsToConvert) // Use actual column name
+      .where('T.TABLE_TYPE', 'BASE TABLE') // Use actual column name
+      .columns('T.TABLE_SCHEMA', 'T.TABLE_NAME')); // Select TABLE_SCHEMA and TABLE_NAME directly
   debug(`Altering ${tables.length} tables`);
   for (const table of tables) {
     await alter(`
-      ALTER TABLE \`${table.table_schema}\`.\`${table.table_name}\`
+      ALTER TABLE \\\`${table.TABLE_SCHEMA}\\\`.\\\`${table.TABLE_NAME}\\\`
         DEFAULT CHARACTER SET utf8mb4
-        COLLATE utf8mb4_unicode_ci`);
+        COLLATE utf8mb4_0900_ai_ci`);
   }
 
   // base query for finding the columns we want to convert
   let columnQuery = knex('information_schema.COLUMNS as C')
-    .where('C.table_schema', 'not in', databasesToSkip)
-    .where('C.character_set_name', 'in', CharsetsToConvert);
+    .where('C.TABLE_SCHEMA', 'not in', databasesToSkip) // Use actual column name
+    .where('C.CHARACTER_SET_NAME', 'in', CharsetsToConvert); // Use actual column name
   for (const tableToSkip of tablesToSkip) {
-    columnQuery = columnQuery.whereNot(function skipTables() {
-      this.where({ 'C.table_schema': tableToSkip.database, 'C.table_name': tableToSkip.table });
+    columnQuery = columnQuery.whereNot(function() {
+      this.where({ 'C.TABLE_SCHEMA': tableToSkip.database, 'C.TABLE_NAME': tableToSkip.table }); // Use actual column names
     });
   }
   for (const columnToSkip of columnsToSkip) {
-    columnQuery = columnQuery.whereNot(function skipColumns() {
+    columnQuery = columnQuery.whereNot(function() {
       this.where({
-        'C.table_schema': columnToSkip.database,
-        'C.table_name': columnToSkip.table,
-        'C.column_name': columnToSkip.column,
+        'C.TABLE_SCHEMA': columnToSkip.database, // Use actual column names
+        'C.TABLE_NAME': columnToSkip.table, // Use actual column names
+        'C.COLUMN_NAME': columnToSkip.column, // Use actual column names
       });
     });
   }
 
-  const problemColumns = await select(
-    columnQuery.clone()
-      .join('information_schema.STATISTICS as S', {
-        'C.table_schema': 'S.table_schema',
-        'C.table_name': 'S.table_name',
-        'C.column_name': 'S.column_name',
-      })
-      .where(function complicated() {
-        this
-          .whereNull('S.sub_part').where('C.character_maximum_length', '>', 191)
-          .orWhere('S.sub_part', '>', 191);
-      })
-      .orderBy('C.table_schema')
-      .orderBy('C.table_name')
-      .orderBy('S.index_name')
-      .columns('S.index_name', 'S.index_type', 'C.table_schema', 'C.table_name', 'C.column_name',
-        'C.data_type', 'C.character_maximum_length', 'S.sub_part'));
-  if (!_.isEmpty(problemColumns)) {
-    console.error(`ERROR: There are ${problemColumns.length} indexed columns to long to convert`);
-    console.error(JSON.stringify(problemColumns, null, 2));
-    console.error('Go write some migrations to fix that');
-    process.exit(1);
+  // Apply databasesToLimit to the base columnQuery before cloning
+  if (!_.isEmpty(databasesToLimit)) {
+    columnQuery = columnQuery.whereIn('C.TABLE_SCHEMA', databasesToLimit);
   }
-  debug('No problem columns detected');
 
-  const columns = await select(
-    columnQuery.clone()
-      .columns(
-        'C.table_schema', 'C.table_name', 'C.column_name', 'C.column_type', 'C.is_nullable'));
-  debug(`Altering ${columns.length} columns`);
-  for (const c of columns) {
-    await alter(`
-      ALTER TABLE \`${c.table_schema}\`.\`${c.table_name}\`
-        MODIFY \`${c.column_name}\` ${c.column_type}
-        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
-          ${c.is_nullable === 'NO' ? ' NOT NULL' : ''}
-          `);
+  const columnQueryForProblem = columnQuery.clone()
+    .join('information_schema.STATISTICS as S', function() {
+      this.on('C.TABLE_SCHEMA', '=', 'S.TABLE_SCHEMA') // Use actual column names
+        .andOn('C.TABLE_NAME', '=', 'S.TABLE_NAME') // Use actual column names
+        .andOn('C.COLUMN_NAME', '=', 'S.COLUMN_NAME'); // Use actual column names
+    })
+    .where(function() {
+      this.whereNull('S.SUB_PART') // Use actual column name
+        .andWhere('C.CHARACTER_MAXIMUM_LENGTH', '>', 191); // Use actual column name
+    })
+    .orWhere('S.SUB_PART', '>', 191) // Use actual column name
+    .orderBy('C.TABLE_SCHEMA', 'asc') // Use actual column name
+    .orderBy('C.TABLE_NAME', 'asc') // Use actual column name
+    .orderBy('S.INDEX_NAME', 'asc') // Use actual column name
+    .columns( // Select uppercase column names
+      'S.INDEX_NAME',
+      'S.INDEX_TYPE',
+      'C.TABLE_SCHEMA',
+      'C.TABLE_NAME',
+      'C.COLUMN_NAME',
+      'C.DATA_TYPE',
+      'C.CHARACTER_MAXIMUM_LENGTH',
+      'S.SUB_PART');
+
+  const columnsForProblem = await select(columnQueryForProblem);
+
+  if (_.isEmpty(columnsForProblem)) {
+    debug('No problem columns detected');
+  } else {
+    console.log('-- Problem columns (index prefix > 191 characters)');
+    for (const column of columnsForProblem) {
+      console.log(`--   \`${column.TABLE_SCHEMA}\`.\`${column.TABLE_NAME}\`.\`${column.COLUMN_NAME}\` (\`${column.INDEX_NAME}\` ${column.INDEX_TYPE} ${column.SUB_PART || column.CHARACTER_MAXIMUM_LENGTH})`);
+    }
   }
+
+  const columnQueryForConvert = columnQuery.clone()
+    .columns( // Select uppercase column names
+      'C.TABLE_SCHEMA',
+      'C.TABLE_NAME',
+      'C.COLUMN_NAME',
+      'C.COLUMN_TYPE',
+      'C.IS_NULLABLE');
+  const columnsToConvert = await select(columnQueryForConvert);
+
+  debug(`Altering ${columnsToConvert.length} columns`);
+  for (const column of columnsToConvert) {
+    await alter(`
+      ALTER TABLE \\\`${column.TABLE_SCHEMA}\\\`.\\\`${column.TABLE_NAME}\\\`
+        MODIFY \\\`${column.COLUMN_NAME}\\\` ${column.COLUMN_TYPE}
+        CHARACTER SET utf8mb4
+        COLLATE utf8mb4_0900_ai_ci${column.IS_NULLABLE === 'NO' ? ' NOT NULL' : ''}`);
+  }
+
+  await knex.destroy();
 }
 
 go()

@@ -3,13 +3,15 @@
   "version": "1.0.0",
   "description": "",
   "bin": {
-    "utf8mb4-converter": "./bin/utf8mb4-converter.js"
+    "utf8mb4-converter": "./bin/wrapper.js"
   },
+  "files": [
+    "lib",
+    "bin"
+  ],
   "scripts": {
-    "build": "mkdir -p lib/ && babel --out-dir lib/ src/",
-    "clean": "rm -rf src/ build/",
-    "prepublish": "npm run test && npm run clean && npm run build",
-    "test": "eslint ."
+    "build": "node build.js",
+    "prepare": "node build.js"
   },
   "repository": {
     "type": "git",
@@ -19,21 +21,24 @@
   "author": "David M. Lee, II",
   "license": "ISC",
   "devDependencies": {
-    "babel-core": "^6.6.4",
-    "babel-eslint": "^5.0.0",
-    "babel-plugin-transform-async-to-generator": "^6.5.0",
-    "babel-preset-es2015": "^6.6.0",
-    "eslint": "^2.2.0",
-    "eslint-config-airbnb": "^6.0.2",
-    "eslint-plugin-babel": "^3.1.0",
-    "eslint-plugin-react": "^4.1.0"
+    "@babel/cli": "^7.22.10",
+    "@babel/core": "^7.22.10",
+    "@babel/preset-env": "^7.22.10",
+    "@babel/register": "^7.22.5",
+    "@babel/plugin-transform-runtime": "^7.22.10"
   },
   "dependencies": {
-    "babel-polyfill": "^6.6.1",
-    "commander": "^2.9.0",
-    "knex": "^0.10.0",
-    "lodash": "^4.6.1",
-    "mysql": "^2.10.2",
+    "@babel/cli": "^7.22.10",
+    "@babel/core": "^7.22.10",
+    "@babel/preset-env": "^7.22.10",
+    "@babel/register": "^7.22.5",
+    "@babel/plugin-transform-runtime": "^7.22.10",
+    "@babel/runtime": "^7.0.0",
+    "@babel/node": "^7.22.10",
+    "commander": "^9.0.0",
+    "knex": "^2.0.0",
+    "lodash": "^4.17.21",
+    "mysql": "^2.18.1",
     "read": "^1.0.7"
   }
 }

@@ -1,5 +1,9 @@
 ---
-parser: 'babel-eslint'
+parser: '@babel/eslint-parser'
+parserOptions:
+  requireConfigFile: false
+  ecmaVersion: 2022
+  sourceType: 'module'
 rules:
   id-length:
     - 0
@@ -9,5 +13,5 @@ rules:
     - 0
   no-console:
     - 0
-extends: airbnb/base
-plugins: [ babel ]
+extends: airbnb-base
+plugins: [ import ]
