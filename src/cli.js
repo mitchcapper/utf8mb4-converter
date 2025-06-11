@@ -1,4 +1,4 @@
-// Copyright (c) 2016, David M. Lee, II
+// Copyright (c) 2016, David M. Lee, II, enhanced 2025 Mitch Capper
 
 import _ from 'lodash';
 import _knex from 'knex';
@@ -61,16 +61,17 @@ program.version(version)
     'Skip conversion of the database/table/column', skip)
   .option('   --limit [database]', 'Limit to given database', d => databasesToLimit.push(d))
   .option('   --make-it-so', 'Execute DDL in addition to printing it out')
-  .option('   --force-latin1', 'Force conversions of latin1 data')
+  .option('   --from-charsets <charsets>', 'Comma-separated list of charsets to convert from [utf8,utf8mb3]', (val) => val.split(','), ['utf8','utf8mb3'])
+  .option('   --charset-to <charset>', 'Target charset to convert to [utf8mb4]', 'utf8mb4')
+  .option('   --collation <collation>', 'Collation to use for conversion [utf8mb4_0900_ai_ci]', 'utf8mb4_0900_ai_ci')
   .option('   --bulk-table', 'Use ALTER TABLE ... CONVERT TO CHARACTER SET for each table rather than the columns individually')
   .option('   --myisam-to-innodb', 'Convert all MyISAM tables to InnoDB before charset conversion');
 program.on('--help', () => {
-  console.log('The --force-latin1 conversion assumes that only ASCII characters are in latin1');
-  console.log('columns. Any international characters in latin1 columns will be corrupted.');
+  console.log('If --password is not given, then no password is used, rather than pass the password on the command line recommend setting it in the environmental variable "MYSQL_PWD" instead.');
   console.log();
-  console.log('If --password is not given, then no password is used.');
-  console.log('The --password may option may optionally specify the password, but putting');
-  console.log('passwords on the command line are not recommended.');
+  console.log('The --from-charsets option allows you to specify which charsets to convert from. Note that latin1 is another popular older default but if you have any non-ASCII chars in a latin1 column they will not convert properly by default so use that charset as a from with caution.');
+  console.log('The --charset-to option allows you to specify the target charset (default: utf8mb4).');
+  console.log('The --collation option allows you to specify the collation to use for conversion.');
 });
 
 // console.log(`Parsing arguments from: ${JSON.stringify(process.argv)}`);
@@ -93,9 +94,11 @@ function debug(...args) {
 }
 
 const options = program.opts();
-const CharsetsToConvert = options.forceLatin1 ? ['utf8', 'latin1', 'utf8mb3'] : ['utf8','utf8mb3'];
+const CharsetsToConvert = options.fromCharsets || ['utf8','utf8mb3'];
+const CharsetTo = options.charsetTo || 'utf8mb4';
+const CollationToUse = options.collation || 'utf8mb4_0900_ai_ci';
 
-debug('settings', JSON.stringify(_.pick(options, ['host', 'user', 'forceLatin1', 'makeItSo'])));
+debug('settings', JSON.stringify(_.pick(options, ['host', 'user', 'fromCharsets', 'charsetTo', 'collation', 'makeItSo'])));
 
 async function go() {
   const options = program.opts();
@@ -167,8 +170,8 @@ async function go() {
   for (const db of databases) {
     await alter(`
       ALTER DATABASE \`${db}\`
-        CHARACTER SET = utf8mb4
-        COLLATE = utf8mb4_0900_ai_ci`);
+        CHARACTER SET = ${CharsetTo}
+        COLLATE = ${CollationToUse}`);
   }
 
   // Convert MyISAM tables to InnoDB if requested
@@ -213,14 +216,14 @@ async function go() {
     for (const table of tables) {
       await alter(`
         ALTER TABLE \`${table.TABLE_SCHEMA}\`.\`${table.TABLE_NAME}\`
-        CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`);
+        CONVERT TO CHARACTER SET ${CharsetTo} COLLATE ${CollationToUse}`);
     }
   } else {
     for (const table of tables) {
       await alter(`
         ALTER TABLE \`${table.TABLE_SCHEMA}\`.\`${table.TABLE_NAME}\`
-        DEFAULT CHARACTER SET utf8mb4
-        COLLATE utf8mb4_0900_ai_ci`);
+        DEFAULT CHARACTER SET ${CharsetTo}
+        COLLATE ${CollationToUse}`);
     }
   }
 
@@ -298,8 +301,8 @@ async function go() {
       await alter(`
         ALTER TABLE \`${column.TABLE_SCHEMA}\`.\`${column.TABLE_NAME}\`
         MODIFY \`${column.COLUMN_NAME}\` ${column.COLUMN_TYPE}
-        CHARACTER SET utf8mb4
-        COLLATE utf8mb4_0900_ai_ci${column.IS_NULLABLE === 'NO' ? ' NOT NULL' : ''}`);
+        CHARACTER SET ${CharsetTo}
+        COLLATE ${CollationToUse}${column.IS_NULLABLE === 'NO' ? ' NOT NULL' : ''}`);
     }
   }
 
