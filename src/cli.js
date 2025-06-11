@@ -52,8 +52,6 @@ function skip(spec) {
   }
 }
 
-console.log(`Original arguments: ${JSON.stringify(process.argv)}`);
-
 program.version(version)
   .option('-h --host [host]', 'MySQL server to connect to [localhost]', 'localhost')
   .option('-u --user [user]', 'User to connect with [root]', 'root')
@@ -63,7 +61,9 @@ program.version(version)
     'Skip conversion of the database/table/column', skip)
   .option('   --limit [database]', 'Limit to given database', d => databasesToLimit.push(d))
   .option('   --make-it-so', 'Execute DDL in addition to printing it out')
-  .option('   --force-latin1', 'Force conversions of latin1 data');
+  .option('   --force-latin1', 'Force conversions of latin1 data')
+  .option('   --bulk-table', 'Use ALTER TABLE ... CONVERT TO CHARACTER SET for each table rather than the columns individually')
+  .option('   --myisam-to-innodb', 'Convert all MyISAM tables to InnoDB before charset conversion');
 program.on('--help', () => {
   console.log('The --force-latin1 conversion assumes that only ASCII characters are in latin1');
   console.log('columns. Any international characters in latin1 columns will be corrupted.');
@@ -157,13 +157,11 @@ async function go() {
 
   let dbQuery = knex('information_schema.SCHEMATA')
       .where('SCHEMA_NAME', 'not in', databasesToSkip); // Use actual column name: SCHEMA_NAME
-  if (!_.isEmpty(databasesToLimit)) {
-    dbQuery = dbQuery.whereIn('SCHEMA_NAME', databasesToLimit); // Filter by SCHEMA_NAME using whereIn
-  }
+  if (!_.isEmpty(databasesToLimit)) { dbQuery = dbQuery.whereIn('SCHEMA_NAME', databasesToLimit); }
   let databases = await select(dbQuery
-    .where('DEFAULT_CHARACTER_SET_NAME', 'in', CharsetsToConvert) // Use actual column name: DEFAULT_CHARACTER_SET_NAME
-    .columns('SCHEMA_NAME')); // Select SCHEMA_NAME directly
-  databases = _.map(databases, 'SCHEMA_NAME'); // Pluck SCHEMA_NAME
+    .where('DEFAULT_CHARACTER_SET_NAME', 'in', CharsetsToConvert)
+    .columns('SCHEMA_NAME'));
+  databases = _.map(databases, 'SCHEMA_NAME');
 
   debug(`Altering ${databases.length} databases`);
   for (const db of databases) {
@@ -171,6 +169,27 @@ async function go() {
       ALTER DATABASE \`${db}\`
         CHARACTER SET = utf8mb4
         COLLATE = utf8mb4_0900_ai_ci`);
+  }
+
+  // Convert MyISAM tables to InnoDB if requested
+  if (options.myisamToInnodb) {
+    debug('Converting MyISAM tables to InnoDB');
+    let myisamQuery = knex('information_schema.TABLES')
+      .where('ENGINE', 'MyISAM')
+      .where('TABLE_SCHEMA', 'not in', databasesToSkip);
+    if (!_.isEmpty(databasesToLimit)) {
+      myisamQuery = myisamQuery.whereIn('TABLE_SCHEMA', databasesToLimit);
+    }
+    for (const tableToSkip of tablesToSkip) {
+      myisamQuery = myisamQuery.whereNot(function() {
+        this.where({ 'TABLE_SCHEMA': tableToSkip.database, 'TABLE_NAME': tableToSkip.table });
+      });
+    }
+    const myisamTables = await select(myisamQuery.columns('TABLE_SCHEMA', 'TABLE_NAME'));
+    debug(`Found ${myisamTables.length} MyISAM tables`);
+    for (const table of myisamTables) {
+      await alter(`ALTER TABLE \`${table.TABLE_SCHEMA}\`.\`${table.TABLE_NAME}\` ENGINE=InnoDB`);
+    }
   }
 
   let tableQuery = knex('information_schema.COLLATION_CHARACTER_SET_APPLICABILITY as CCSA')
@@ -190,11 +209,19 @@ async function go() {
       .where('T.TABLE_TYPE', 'BASE TABLE') // Use actual column name
       .columns('T.TABLE_SCHEMA', 'T.TABLE_NAME')); // Select TABLE_SCHEMA and TABLE_NAME directly
   debug(`Altering ${tables.length} tables`);
-  for (const table of tables) {
-    await alter(`
-      ALTER TABLE \\\`${table.TABLE_SCHEMA}\\\`.\\\`${table.TABLE_NAME}\\\`
+  if (options.bulkTable) {
+    for (const table of tables) {
+      await alter(`
+        ALTER TABLE \`${table.TABLE_SCHEMA}\`.\`${table.TABLE_NAME}\`
+        CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`);
+    }
+  } else {
+    for (const table of tables) {
+      await alter(`
+        ALTER TABLE \`${table.TABLE_SCHEMA}\`.\`${table.TABLE_NAME}\`
         DEFAULT CHARACTER SET utf8mb4
         COLLATE utf8mb4_0900_ai_ci`);
+    }
   }
 
   // base query for finding the columns we want to convert
@@ -265,13 +292,15 @@ async function go() {
       'C.IS_NULLABLE');
   const columnsToConvert = await select(columnQueryForConvert);
 
-  debug(`Altering ${columnsToConvert.length} columns`);
-  for (const column of columnsToConvert) {
-    await alter(`
-      ALTER TABLE \\\`${column.TABLE_SCHEMA}\\\`.\\\`${column.TABLE_NAME}\\\`
-        MODIFY \\\`${column.COLUMN_NAME}\\\` ${column.COLUMN_TYPE}
+  if (!options.bulkTable) {
+    debug(`Altering ${columnsToConvert.length} columns`);
+    for (const column of columnsToConvert) {
+      await alter(`
+        ALTER TABLE \`${column.TABLE_SCHEMA}\`.\`${column.TABLE_NAME}\`
+        MODIFY \`${column.COLUMN_NAME}\` ${column.COLUMN_TYPE}
         CHARACTER SET utf8mb4
         COLLATE utf8mb4_0900_ai_ci${column.IS_NULLABLE === 'NO' ? ' NOT NULL' : ''}`);
+    }
   }
 
   await knex.destroy();
